@@ -1,6 +1,14 @@
 # config/settings.py
 import os
 
+class ManagerAccountConfig:
+    """管理员账号配置"""
+
+    def __init__(self):
+        self.account = ""
+        self.password = ""
+        self.is_configured = False
+
 # 定义默认下载目录为程序运行目录下的 'raw_data'
 # 确保在 main.py 中将当前工作目录设置为脚本所在目录，以保证相对路径正确
 DOWNLOAD_DIR = os.path.join(os.getcwd(), "raw_data")
@@ -27,3 +35,16 @@ FIELD_MAPPING_EXCEL_AND_UI = {
 }
 
 EXCEL_SHEET_NAME_ACCEPTANCE = "验收测试结果"
+
+
+MANAGER_CONFIG = ManagerAccountConfig()
+
+# BUG查询相关配置
+BUG_QUERY_STATUS_OPTIONS = [
+    "all", "active", "resolved", "closed"
+]
+
+BUG_SEVERITY_OPTIONS = [
+    "1", "2", "3", "4"  # 1-严重，2-主要，3-次要，4-建议
+]
+
