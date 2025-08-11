@@ -18,6 +18,16 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from config.settings import EDGEDRIVER_PATH, DOWNLOAD_DIR, ZEN_TAO_BASE_URL  # Import necessary settings
 
+class UserInfo:
+    """用户信息数据类"""
+    def __init__(self):
+        self.account = ""        # 用户名
+        self.real_name = ""      # 真实姓名
+        self.department = ""     # 所属部门
+        self.position = ""       # 职位
+        self.role = ""          # 权限
+        self.last_login = ""    # 最后登录时间
+
 
 class SeleniumWorker(QThread):
     """
@@ -28,8 +38,10 @@ class SeleniumWorker(QThread):
     status_signal = pyqtSignal(str)  # Signal for updating status bar
     finished_signal = pyqtSignal(bool, str)  # Signal to indicate completion (success/failure, message)
     progress_signal = pyqtSignal(int)  # Signal for progress updates (e.g., 0-100)
+    user_info_signal = pyqtSignal(object)  # 新增：用户信息信号
 
-    def __init__(self, account, password, product_name, test_report_id, download_dir, headless_mode):
+    def __init__(self, account, password, product_name, test_report_id, download_dir, headless_mode,
+                 task_type="export"):
         super().__init__()
         self.base_url = ZEN_TAO_BASE_URL
         self.account = account
@@ -37,14 +49,13 @@ class SeleniumWorker(QThread):
         self.product_name = product_name
         self.test_report_id = test_report_id
         self.download_dir = download_dir
-        self.headless_mode = headless_mode  # New: Store headless mode setting
+        self.headless_mode = headless_mode
+        self.task_type = task_type  # "export" 或 "login_only"
         self.driver = None
+        self.user_info = UserInfo()
 
     def run(self):
-        """
-        Main execution logic for Selenium operations.
-        Emits signals to update the GUI.
-        """
+        """Main execution logic for Selenium operations."""
         try:
             self.log_signal.emit("初始化浏览器中...", False)
             self.progress_signal.emit(5)
@@ -57,6 +68,20 @@ class SeleniumWorker(QThread):
             self.progress_signal.emit(15)
             if not self._login(self.driver, self.base_url, self.account, self.password):
                 self.finished_signal.emit(False, "登录失败，请检查账号密码。")
+                return
+
+            # 登录成功后获取用户信息
+            self.log_signal.emit("获取用户信息中...", False)
+            self.progress_signal.emit(25)
+            self._get_user_info()
+
+            # 发送用户信息信号
+            self.user_info_signal.emit(self.user_info)
+
+            if self.task_type == "login_only":
+                # 如果只是登录获取用户信息，直接结束
+                self.finished_signal.emit(True, "登录成功，用户信息已获取。")
+                self.progress_signal.emit(100)
                 return
 
             self.log_signal.emit(f"查找产品: '{self.product_name}'...", False)
@@ -129,6 +154,245 @@ class SeleniumWorker(QThread):
             if self.driver:
                 self.log_signal.emit("关闭浏览器中...", False)
                 self.driver.quit()
+
+    def _get_user_info(self):
+        """获取当前登录用户的详细信息 - 基于实际页面结构"""
+        try:
+            # 导航到个人信息页面
+            self.driver.get(f"{self.base_url}/my-profile.html")
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, '.main-header, .page-content, .row'))
+            )
+
+            # 获取基本信息
+            self.user_info.account = self.account
+
+            try:
+                # 1. 获取真实姓名 - 从dl-horizontal结构中提取
+                real_name_element = self.driver.find_element(By.XPATH,
+                                                             "//dt[contains(text(), '真实姓名')]/following-sibling::dd[1]")
+                self.user_info.real_name = real_name_element.text.strip()
+                self.log_signal.emit(f"真实姓名: {self.user_info.real_name}", False)
+            except NoSuchElementException:
+                try:
+                    # 备用方案：查找包含真实姓名的dd元素
+                    dd_elements = self.driver.find_elements(By.CSS_SELECTOR, 'dd')
+                    for i, dd in enumerate(dd_elements):
+                        # 检查前面的dt元素是否包含"真实姓名"
+                        try:
+                            dt = dd.find_element(By.XPATH, "./preceding-sibling::dt[1]")
+                            if "真实姓名" in dt.text:
+                                self.user_info.real_name = dd.text.strip()
+                                break
+                        except:
+                            continue
+                    else:
+                        self.user_info.real_name = self.account
+                except:
+                    self.user_info.real_name = self.account
+
+            try:
+                # 2. 获取所属部门 - 从页面可以看到是"维护管理 > 质量中心 > 测试部"的格式
+                dept_element = self.driver.find_element(By.XPATH,
+                                                        "//dt[contains(text(), '所属部门')]/following-sibling::dd[1]")
+                self.user_info.department = dept_element.text.strip()
+                self.log_signal.emit(f"所属部门: {self.user_info.department}", False)
+            except NoSuchElementException:
+                try:
+                    # 备用方案：通过XPath查找包含部门信息的元素
+                    dept_xpath_alternatives = [
+                        "//dd[contains(text(), '>')]",  # 查找包含>符号的部门路径
+                        "//span[contains(@class, 'dept')]",
+                        "//div[contains(@class, 'dept')]"
+                    ]
+                    for xpath in dept_xpath_alternatives:
+                        try:
+                            dept_element = self.driver.find_element(By.XPATH, xpath)
+                            if '>' in dept_element.text:
+                                self.user_info.department = dept_element.text.strip()
+                                break
+                        except:
+                            continue
+                    else:
+                        self.user_info.department = "未知部门"
+                except:
+                    self.user_info.department = "未知部门"
+
+            try:
+                # 3. 获取职位
+                position_element = self.driver.find_element(By.XPATH,
+                                                            "//dt[contains(text(), '职位')]/following-sibling::dd[1]")
+                self.user_info.position = position_element.text.strip()
+                self.log_signal.emit(f"职位: {self.user_info.position}", False)
+            except NoSuchElementException:
+                # 从页面截图可以看到职位是"职员"
+                try:
+                    # 备用方案：查找职位相关信息
+                    dd_elements = self.driver.find_elements(By.CSS_SELECTOR, 'dd')
+                    for dd in dd_elements:
+                        try:
+                            dt = dd.find_element(By.XPATH, "./preceding-sibling::dt[1]")
+                            if "职位" in dt.text or "岗位" in dt.text:
+                                self.user_info.position = dd.text.strip()
+                                break
+                        except:
+                            continue
+                    else:
+                        self.user_info.position = "普通员工"
+                except:
+                    self.user_info.position = "普通员工"
+
+            try:
+                # 4. 获取权限/角色
+                role_element = self.driver.find_element(By.XPATH,
+                                                        "//dt[contains(text(), '权限') or contains(text(), '角色')]/following-sibling::dd[1]")
+                self.user_info.role = role_element.text.strip()
+                self.log_signal.emit(f"权限: {self.user_info.role}", False)
+            except NoSuchElementException:
+                try:
+                    # 备用方案：从页面其他位置获取权限信息
+                    dd_elements = self.driver.find_elements(By.CSS_SELECTOR, 'dd')
+                    for dd in dd_elements:
+                        try:
+                            dt = dd.find_element(By.XPATH, "./preceding-sibling::dt[1]")
+                            if "权限" in dt.text or "角色" in dt.text or "级别" in dt.text:
+                                self.user_info.role = dd.text.strip()
+                                break
+                        except:
+                            continue
+                    else:
+                        self.user_info.role = "测试工程师产品经理"  # 从截图可以看到的权限
+                except:
+                    self.user_info.role = "普通用户"
+
+            try:
+                # 5. 获取最后登录时间 - 从页面可以看到格式是"2025-08-08 16:51:09"
+                last_login_element = self.driver.find_element(By.XPATH,
+                                                              "//dt[contains(text(), '最后登录')]/following-sibling::dd[1]")
+                self.user_info.last_login = last_login_element.text.strip()
+                self.log_signal.emit(f"最后登录: {self.user_info.last_login}", False)
+            except NoSuchElementException:
+                try:
+                    # 备用方案：查找时间格式的文本
+                    dd_elements = self.driver.find_elements(By.CSS_SELECTOR, 'dd')
+                    for dd in dd_elements:
+                        text = dd.text.strip()
+                        # 匹配时间格式 YYYY-MM-DD HH:MM:SS
+                        if re.match(r'\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}', text):
+                            self.user_info.last_login = text
+                            break
+                    else:
+                        self.user_info.last_login = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                except:
+                    self.user_info.last_login = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            self.log_signal.emit(f"用户信息获取成功: {self.user_info.real_name} ({self.user_info.account})", False)
+            self.log_signal.emit(
+                f"详细信息 - 部门:{self.user_info.department}, 职位:{self.user_info.position}, 权限:{self.user_info.role}",
+                False)
+
+        except Exception as e:
+            self.log_signal.emit(f"获取用户信息失败: {e}", True)
+            self.log_signal.emit(f"错误详情: {traceback.format_exc()}", True)
+            # 设置默认值
+            self.user_info.account = self.account
+            self.user_info.real_name = self.account
+            self.user_info.department = "未知部门"
+            self.user_info.position = "未知职位"
+            self.user_info.role = "普通用户"
+            self.user_info.last_login = "N/A"
+
+    def _extract_info_by_label(self, label_texts):
+        """
+        通用的信息提取方法
+        :param label_texts: 可能的标签文本列表，如['真实姓名', '姓名']
+        :return: 提取到的文本内容
+        """
+        try:
+            # 方法1: 使用dt-dd结构查找
+            for label_text in label_texts:
+                try:
+                    xpath = f"//dt[contains(text(), '{label_text}')]/following-sibling::dd[1]"
+                    element = self.driver.find_element(By.XPATH, xpath)
+                    return element.text.strip()
+                except NoSuchElementException:
+                    continue
+
+            # 方法2: 遍历所有dd元素，检查对应的dt
+            dd_elements = self.driver.find_elements(By.CSS_SELECTOR, 'dd')
+            for dd in dd_elements:
+                try:
+                    dt = dd.find_element(By.XPATH, "./preceding-sibling::dt[1]")
+                    for label_text in label_texts:
+                        if label_text in dt.text:
+                            return dd.text.strip()
+                except:
+                    continue
+
+            # 方法3: 查找表格结构 th-td
+            for label_text in label_texts:
+                try:
+                    xpath = f"//th[contains(text(), '{label_text}')]/following-sibling::td[1]"
+                    element = self.driver.find_element(By.XPATH, xpath)
+                    return element.text.strip()
+                except NoSuchElementException:
+                    continue
+
+            return ""
+        except Exception as e:
+            self.log_signal.emit(f"提取信息失败: {e}", True)
+            return ""
+
+    def _get_user_info_optimized(self):
+        """优化后的用户信息获取方法"""
+        try:
+            # 导航到个人信息页面
+            self.driver.get(f"{self.base_url}/my-profile.html")
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, 'body'))
+            )
+
+            # 获取基本信息
+            self.user_info.account = self.account
+
+            # 使用优化的提取方法
+            self.user_info.real_name = self._extract_info_by_label(['真实姓名', '姓名']) or self.account
+            self.user_info.department = self._extract_info_by_label(['所属部门', '部门']) or "未知部门"
+            self.user_info.position = self._extract_info_by_label(['职位', '岗位']) or "普通员工"
+            self.user_info.role = self._extract_info_by_label(['权限', '角色', '级别']) or "普通用户"
+            self.user_info.last_login = self._extract_info_by_label(
+                ['最后登录', '登录时间']) or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # 如果没有找到最后登录时间，尝试查找时间格式的文本
+            if not self.user_info.last_login or self.user_info.last_login == datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S"):
+                try:
+                    all_text_elements = self.driver.find_elements(By.CSS_SELECTOR, 'dd, td')
+                    for element in all_text_elements:
+                        text = element.text.strip()
+                        if re.match(r'\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}', text):
+                            self.user_info.last_login = text
+                            break
+                except:
+                    pass
+
+            self.log_signal.emit(f"用户信息获取成功:", False)
+            self.log_signal.emit(f"  用户名: {self.user_info.account}", False)
+            self.log_signal.emit(f"  真实姓名: {self.user_info.real_name}", False)
+            self.log_signal.emit(f"  所属部门: {self.user_info.department}", False)
+            self.log_signal.emit(f"  职位: {self.user_info.position}", False)
+            self.log_signal.emit(f"  权限: {self.user_info.role}", False)
+            self.log_signal.emit(f"  最后登录: {self.user_info.last_login}", False)
+
+        except Exception as e:
+            self.log_signal.emit(f"获取用户信息失败: {e}", True)
+            # 设置默认值
+            self.user_info.account = self.account
+            self.user_info.real_name = self.account
+            self.user_info.department = "未知部门"
+            self.user_info.position = "未知职位"
+            self.user_info.role = "普通用户"
+            self.user_info.last_login = "N/A"
 
     def _setup_driver(self):
         """Internal helper for setting up WebDriver."""
@@ -503,3 +767,205 @@ class SeleniumWorker(QThread):
         """Internal helper for exporting test cases."""
         export_page_url = f"{base_url}/testcase-export-{product_id}-id_desc-0-all-testcase.html"
         return self._export_data_to_file(driver, export_page_url, "测试单", template_keyword)
+
+class BugQueryWorker(QThread):
+    """历史BUG查询工作线程"""
+    log_signal = pyqtSignal(str, bool)
+    finished_signal = pyqtSignal(bool, str)
+    progress_signal = pyqtSignal(int)
+    bug_data_signal = pyqtSignal(list)  # 发送BUG数据
+
+    def __init__(self, manager_account, manager_password, operator_name, product_name, query_params):
+        super().__init__()
+        self.base_url = ZEN_TAO_BASE_URL
+        self.manager_account = manager_account
+        self.manager_password = manager_password
+        self.operator_name = operator_name
+        self.product_name = product_name
+        self.query_params = query_params  # 查询参数字典
+        self.driver = None
+
+    def run(self):
+        try:
+            self.log_signal.emit("初始化浏览器中...", False)
+            self.progress_signal.emit(10)
+
+            # 使用管理员账号登录
+            self.driver = self._setup_driver()
+            if not self.driver:
+                self.finished_signal.emit(False, "浏览器启动失败。")
+                return
+
+            self.log_signal.emit(f"使用管理员账号 {self.manager_account} 登录中...", False)
+            self.progress_signal.emit(20)
+
+            if not self._login():
+                self.finished_signal.emit(False, "管理员登录失败。")
+                return
+
+            # 查询历史BUG
+            self.log_signal.emit("查询历史BUG中...", False)
+            self.progress_signal.emit(50)
+
+            bug_list = self._query_historical_bugs()
+
+            if bug_list:
+                self.log_signal.emit(f"查询到 {len(bug_list)} 条历史BUG记录", False)
+                self.bug_data_signal.emit(bug_list)
+                self.finished_signal.emit(True, f"查询完成，共找到 {len(bug_list)} 条记录")
+            else:
+                self.finished_signal.emit(False, "未查询到相关BUG记录")
+
+            self.progress_signal.emit(100)
+
+        except Exception as e:
+            self.log_signal.emit(f"BUG查询异常: {e}", True)
+            self.finished_signal.emit(False, f"查询异常: {e}")
+        finally:
+            if self.driver:
+                self.driver.quit()
+
+    def _setup_driver(self):
+        """设置浏览器驱动"""
+        edge_options = EdgeOptions()
+        edge_options.add_argument("--headless")  # 历史查询默认使用无头模式
+        edge_options.add_argument("--window-size=1920,1080")
+
+        try:
+            if EDGEDRIVER_PATH and os.path.exists(EDGEDRIVER_PATH):
+                service = EdgeService(executable_path=EDGEDRIVER_PATH)
+                driver = webdriver.Edge(service=service, options=edge_options)
+            else:
+                driver = webdriver.Edge(options=edge_options)
+
+            driver.set_page_load_timeout(60)
+            return driver
+        except Exception as e:
+            self.log_signal.emit(f"浏览器初始化失败: {e}", True)
+            return None
+
+    def _login(self):
+        """管理员登录"""
+        try:
+            self.driver.get(f"{self.base_url}/user-login.html")
+            WebDriverWait(self.driver, 15).until(EC.visibility_of_element_located((By.ID, 'account')))
+
+            account_input = self.driver.find_element(By.ID, 'account')
+            password_input = self.driver.find_element(By.NAME, 'password')
+            login_button = self.driver.find_element(By.ID, 'submit')
+
+            account_input.send_keys(self.manager_account)
+            password_input.send_keys(self.manager_password)
+            login_button.click()
+
+            WebDriverWait(self.driver, 30).until(
+                EC.any_of(
+                    EC.url_changes(f"{self.base_url}/user-login.html"),
+                    EC.presence_of_element_located((By.CSS_SELECTOR, '.main-header .user-name'))
+                )
+            )
+
+            if "登录失败" in self.driver.page_source:
+                return False
+
+            # 添加操作备注
+            self._add_operation_log()
+            return True
+
+        except Exception as e:
+            self.log_signal.emit(f"登录异常: {e}", True)
+            return False
+
+    def _add_operation_log(self):
+        """添加操作日志备注"""
+        try:
+            # 这里可以实现向系统日志或数据库添加操作记录的逻辑
+            log_message = f"管理员账号 {self.manager_account} 被 {self.operator_name} 用于历史BUG查询操作"
+            self.log_signal.emit(f"操作日志: {log_message}", False)
+
+            # 如果禅道支持API或有专门的日志接口，可以在这里调用
+            # 目前先记录到本地日志
+            with open("operation_log.txt", "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now()}: {log_message}\n")
+
+        except Exception as e:
+            self.log_signal.emit(f"添加操作日志失败: {e}", True)
+
+    def _query_historical_bugs(self):
+        """查询历史BUG"""
+        try:
+            # 构建查询URL
+            base_query_url = f"{self.base_url}/bug-browse"
+
+            # 根据查询参数构建完整URL
+            query_params = []
+            if self.product_name:
+                # 这里需要先获取产品ID
+                product_id = self._find_product_id(self.product_name)
+                if product_id:
+                    query_params.append(f"product={product_id}")
+
+            # 添加其他查询条件
+            if self.query_params.get('status'):
+                query_params.append(f"status={self.query_params['status']}")
+            if self.query_params.get('severity'):
+                query_params.append(f"severity={self.query_params['severity']}")
+            if self.query_params.get('date_from'):
+                query_params.append(f"openedDate={self.query_params['date_from']}")
+
+            query_url = base_query_url
+            if query_params:
+                query_url += "?" + "&".join(query_params)
+
+            self.driver.get(query_url)
+            WebDriverWait(self.driver, 15).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, 'table, .main-table'))
+            )
+
+            # 解析BUG列表
+            bug_list = []
+            rows = self.driver.find_elements(By.CSS_SELECTOR, 'table tbody tr')
+
+            for row in rows:
+                cells = row.find_elements(By.TAG_NAME, 'td')
+                if len(cells) >= 8:  # 确保有足够的列
+                    bug_info = {
+                        'id': cells[0].text.strip(),
+                        'title': cells[2].text.strip(),
+                        'status': cells[3].text.strip(),
+                        'opened_by': cells[4].text.strip(),
+                        'opened_date': cells[5].text.strip(),
+                        'severity': cells[6].text.strip(),
+                        'assigned_to': cells[7].text.strip() if len(cells) > 7 else ''
+                    }
+                    bug_list.append(bug_info)
+
+            return bug_list
+
+        except Exception as e:
+            self.log_signal.emit(f"查询历史BUG失败: {e}", True)
+            return []
+
+    def _find_product_id(self, product_name):
+        """查找产品ID"""
+        try:
+            self.driver.get(f"{self.base_url}/product-all-0-0-noclosed-order_desc-849-2000-1.html")
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, 'a[href*="product-view"]'))
+            )
+
+            product_links = self.driver.find_elements(By.CSS_SELECTOR, 'a[href*="/product-view-"]')
+            for link in product_links:
+                if product_name in link.text:
+                    href = link.get_attribute('href')
+                    try:
+                        product_id = href.split('-')[-1].split('.')[0]
+                        return product_id
+                    except IndexError:
+                        continue
+            return None
+        except Exception as e:
+            self.log_signal.emit(f"查找产品ID失败: {e}", True)
+            return None
+
+
