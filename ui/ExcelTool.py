@@ -154,4 +154,3 @@ class ExcelTool(QWidget):
 
         except Exception as e:
             QMessageBox.critical(self, "错误", f"发生错误：\n{str(e)}")
-
