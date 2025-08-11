@@ -16,7 +16,7 @@ class SettingsManager:
 
     def save_settings(self, settings_type: str, settings_data: dict, log_callback=None):
         """Saves the settings to a JSON file with UTF-8 encoding."""
-        file_path = os.path.join(self.config_dir, f"{settings_type}.txt")
+        file_path = os.path.join(self.config_dir, f"{settings_type}.ini")
         try:
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(settings_data, f, ensure_ascii=False, indent=4)
@@ -28,7 +28,7 @@ class SettingsManager:
 
     def load_settings(self, settings_type: str, default_settings: dict, log_callback=None) -> dict:
         """Loads settings from a JSON file, attempting UTF-8 first, then GBK."""
-        file_path = os.path.join(self.config_dir, f"{settings_type}.txt")
+        file_path = os.path.join(self.config_dir, f"{settings_type}.ini")
         if os.path.exists(file_path):
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
