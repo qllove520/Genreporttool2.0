@@ -37,6 +37,8 @@ def write_to_target_sheet(file_path, sheet_name, cell_map, data_dict):
         sheet[cell] = data_dict.get(key, "")
     wb.save(file_path)
 
+
+
 def fill_excel_template_acceptance(template_path: str, data: dict, field_mapping: dict, sheet_name: str, log_callback=None):
     """
     Fills an Excel template with user input data, handles merged cells.
